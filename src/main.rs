@@ -5,6 +5,7 @@
 
 mod digits;
 mod symbols;
+mod types;
 
 use cortex_m_rt::entry; // Marks `main` as the reset handler for Cortex-M.
 use embedded_hal::digital::InputPin;
@@ -12,9 +13,51 @@ use microbit::hal::gpio::{p0::P0_14, p0::P0_23, Floating, Input};
 use microbit::{board::Board, display::blocking::Display, hal::Timer};
 use panic_halt as _; // On panic, halt the processor (stops execution).
 
+#[derive(Copy, Clone)]
 enum Mode {
     Menue,
     CountDown,
+}
+
+#[derive(Copy, Clone)]
+enum Action {
+    IncTimer,
+    DecTimer,
+    StartTimer,
+    None,
+    Reset,
+}
+
+struct AppState {
+    mode: Mode,
+    countdown_minutes: usize,
+}
+
+impl AppState {
+    fn decrement_minute(self) -> AppState {
+        if self.countdown_minutes > 0 {
+            AppState {
+                countdown_minutes: self.countdown_minutes - 1,
+                ..self
+            }
+        } else {
+            self
+        }
+    }
+
+    fn increment_minute(self) -> AppState {
+        AppState {
+            countdown_minutes: self.countdown_minutes + 1,
+            ..self
+        }
+    }
+
+    fn timer_started(&self) -> bool {
+        match self.mode {
+            Mode::Menue => false,
+            Mode::CountDown => true,
+        }
+    }
 }
 
 type ButtonA = P0_14<Input<Floating>>;
@@ -27,48 +70,115 @@ fn main() -> ! {
     let board = Board::take().unwrap();
     let mut button_a = board.buttons.button_a;
     let mut button_b = board.buttons.button_b;
-    let mut mode = Mode::Menue;
-    let mut countdown_minutes: usize = 5;
+
+    let mut state: AppState = AppState {
+        mode: Mode::Menue,
+        countdown_minutes: 5,
+    };
+    let mut second_indicator_on: bool = false;
+
     // // Wrap TIMER0 peripheral for use as a blocking delay source.
     let mut timer = Timer::new(board.TIMER0);
     // // Initialise the 5×5 LED matrix via its GPIO pins.
     let mut display = Display::new(board.display_pins);
     display.clear();
 
-    // // 5×5 bitmap for a heart shape: 1 = LED on, 0 = LED off.
-    // let heart = [
-    //     [0, 1, 0, 1, 0],
-    //     [1, 1, 1, 1, 1],
-    //     [1, 1, 1, 1, 1],
-    //     [0, 1, 1, 1, 0],
-    //     [0, 0, 1, 0, 0],
-    // ];
+    const PAUSE: u32 = 200;
+    const ONE_SECOND: u32 = 1000;
+    const ONE_MINUTE: u32 = ONE_SECOND * 60;
+    let mut minute_tracker: u32 = 0;
+    let mut second_tracker: u32 = 0;
+
+    let mut display_buffer;
 
     loop {
-        match mode {
-            Mode::Menue => menue_handler(&mut button_a, &mut button_b, &mut countdown_minutes),
-            Mode::CountDown => todo!(),
+        let action = infer_action(
+            state.mode,
+            button_a.is_low().unwrap(),
+            button_b.is_low().unwrap(),
+        );
+        state = handle_action(state, action);
+
+        display_buffer = render_state(&state);
+
+        minute_tracker += PAUSE;
+        if minute_tracker >= ONE_MINUTE {
+            minute_tracker = 0;
+            state = handle_minute_passing(state);
         }
-        let glyph = match digits::DIGITS.get(countdown_minutes) {
-            Some(&glyph) => glyph,
-            None => symbols::CROSS,
-        };
-        display.show(&mut timer, glyph, 200);
-        // // Show the heart for 1000 ms (blocking — uses the timer internally).
-        // display.show(&mut timer, heart, 1000);
-        // // Turn off all LEDs before the pause.
-        // display.clear();
-        // // Wait 500 ms with the display blank, creating a blinking effect.
-        // timer.delay_ms(500_u32);
+
+        second_tracker += PAUSE;
+        if second_tracker >= ONE_SECOND {
+            second_indicator_on = !second_indicator_on;
+            second_tracker = 0;
+        }
+
+        if second_indicator_on && state.timer_started() {
+            display_buffer = overlay(display_buffer, symbols::CORNERS);
+        }
+
+        display.show(&mut timer, display_buffer, PAUSE);
     }
 }
 
-fn menue_handler(button_a: &mut ButtonA, button_b: &mut ButtonB, countdown_minutes: &mut usize) {
-    if button_a.is_low().unwrap() && *countdown_minutes > 0_usize {
-        *countdown_minutes -= 1_usize;
+fn overlay(buff1: types::LedMatrix, buff2: types::LedMatrix) -> types::LedMatrix {
+    let mut result = [[0u8; 5]; 5];
+    for row in 0..5 {
+        for col in 0..5 {
+            result[row][col] = buff1[row][col] | buff2[row][col];
+        }
     }
+    result
+}
 
-    if button_b.is_low().unwrap() && *countdown_minutes < 60_usize {
-        *countdown_minutes += 1_usize;
+fn render_state(state: &AppState) -> types::LedMatrix {
+    match digits::DIGITS.get(state.countdown_minutes) {
+        Some(&glyph) => glyph,
+        None => symbols::CROSS,
+    }
+}
+
+fn handle_minute_passing(state: AppState) -> AppState {
+    match state.mode {
+        Mode::Menue => state,
+        Mode::CountDown => state.decrement_minute(),
+    }
+}
+
+fn handle_action(state: AppState, action: Action) -> AppState {
+    match state.mode {
+        Mode::Menue => match action {
+            Action::IncTimer => state.increment_minute(),
+            Action::DecTimer => state.decrement_minute(),
+            Action::StartTimer => AppState {
+                mode: Mode::CountDown,
+                ..state
+            },
+            _ => state,
+        },
+        Mode::CountDown => match action {
+            Action::Reset => AppState {
+                mode: Mode::Menue,
+                countdown_minutes: 5,
+            },
+            _ => state,
+        },
+    }
+}
+
+fn infer_action(mode: Mode, button_a_pressed: bool, button_b_pressed: bool) -> Action {
+    match mode {
+        Mode::Menue => match (button_a_pressed, button_b_pressed) {
+            (true, true) => Action::StartTimer,
+            (true, false) => Action::DecTimer,
+            (false, true) => Action::IncTimer,
+            (false, false) => Action::None,
+        },
+        Mode::CountDown => match (button_a_pressed, button_b_pressed) {
+            (true, true) => Action::Reset,
+            (true, false) => Action::None,
+            (false, true) => Action::None,
+            (false, false) => Action::None,
+        },
     }
 }

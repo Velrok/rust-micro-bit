@@ -1,6 +1,6 @@
-use crate::digits::Glyph;
+use crate::types::LedMatrix;
 
-pub const TICK: Glyph = [
+pub const TICK: LedMatrix = [
     [0, 0, 0, 0, 0],
     [0, 0, 0, 0, 1],
     [0, 0, 0, 1, 0],
@@ -8,7 +8,23 @@ pub const TICK: Glyph = [
     [0, 1, 0, 0, 0],
 ];
 
-pub const CROSS: Glyph = [
+pub const BLANK: LedMatrix = [
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+];
+
+pub const CORNERS: LedMatrix = [
+    [1, 0, 0, 0, 1],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [1, 0, 0, 0, 1],
+];
+
+pub const CROSS: LedMatrix = [
     [1, 0, 0, 0, 1],
     [0, 1, 0, 1, 0],
     [0, 0, 1, 0, 0],

@@ -1,4 +1,5 @@
-pub type Glyph = [[u8; 5]; 5];
+use crate::types::LedMatrix;
+pub type Glyph = LedMatrix;
 
 pub const ZERO: Glyph = [
     [0, 1, 1, 1, 0],
