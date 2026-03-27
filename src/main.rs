@@ -13,6 +13,7 @@ use microbit::hal::gpio::{p0::P0_14, p0::P0_23, Floating, Input};
 use microbit::{board::Board, display::blocking::Display, hal::Timer};
 use panic_halt as _; // On panic, halt the processor (stops execution).
 
+// TODO: typo — rename `Menue` to `Menu`
 #[derive(Copy, Clone)]
 enum Mode {
     Menue,
@@ -34,6 +35,9 @@ struct AppState {
 }
 
 impl AppState {
+    // TODO: button debounce — raw is_low() polling causes multiple triggers on a single press;
+    //       track previous button state and only act on rising/falling edge transitions.
+
     fn decrement_minute(self) -> AppState {
         if self.countdown_minutes > 0 {
             AppState {
@@ -101,6 +105,9 @@ fn main() -> ! {
 
         display_buffer = render_state(&state);
 
+        // TODO: timing drift — accumulating PAUSE per loop assumes display.show() takes exactly
+        //       PAUSE ms, but any jitter causes clock skew. Consider using timer.read() for
+        //       elapsed time instead of loop-count accumulation.
         minute_tracker += PAUSE;
         if minute_tracker >= ONE_MINUTE {
             minute_tracker = 0;
