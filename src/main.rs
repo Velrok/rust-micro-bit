@@ -9,7 +9,7 @@ mod types;
 
 use cortex_m_rt::entry; // Marks `main` as the reset handler for Cortex-M.
 use embedded_hal::digital::InputPin;
-use microbit::hal::gpio::{p0::P0_14, p0::P0_23, Floating, Input};
+// use microbit::hal::gpio::{p0::P0_14, p0::P0_23, Floating, Input};
 use microbit::{board::Board, display::blocking::Display, hal::Timer};
 use panic_halt as _; // On panic, halt the processor (stops execution).
 
