@@ -183,9 +183,3 @@ my-microbit-project/
 - **[Embedded Rust Discovery Book](https://docs.rust-embedded.org/discovery/microbit/)** — the official intro course using the Micro:Bit
 - **[impl Rust for Microbit](https://mb2.implrust.com/)** — a newer, more hands-on book specifically for v2
 - **[microbit-v2 crate docs](https://crates.io/crates/microbit-v2)** — the main board support crate with lots of examples
-
----
-
-## ⚠️ Mac M4 Gotcha
-
-Your M4 Mac is ARM-native, but `probe-rs` works great on Apple Silicon. If you hit any USB permissions issues with the Micro:Bit not being detected, check `probe-rs list` to confirm it sees the board before flashing.
