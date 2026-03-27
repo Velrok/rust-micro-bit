@@ -47,7 +47,7 @@ impl AppState {
 
     fn increment_minute(self) -> AppState {
         AppState {
-            countdown_minutes: self.countdown_minutes + 1,
+            countdown_minutes: (self.countdown_minutes + 1).clamp(0, 60),
             ..self
         }
     }
@@ -60,8 +60,8 @@ impl AppState {
     }
 }
 
-type ButtonA = P0_14<Input<Floating>>;
-type ButtonB = P0_23<Input<Floating>>;
+// type ButtonA = P0_14<Input<Floating>>;
+// type ButtonB = P0_23<Input<Floating>>;
 
 // `#[entry]` replaces the standard `main`; `-> !` means this function never returns.
 #[entry]
