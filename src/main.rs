@@ -13,10 +13,9 @@ use microbit::hal::gpio::{p0::P0_14, p0::P0_23, Floating, Input};
 use microbit::{board::Board, display::blocking::Display, hal::Timer};
 use panic_halt as _; // On panic, halt the processor (stops execution).
 
-// TODO: typo — rename `Menue` to `Menu`
 #[derive(Copy, Clone)]
 enum Mode {
-    Menue,
+    Menu,
     CountDown,
 }
 
@@ -58,7 +57,7 @@ impl AppState {
 
     fn timer_started(&self) -> bool {
         match self.mode {
-            Mode::Menue => false,
+            Mode::Menu => false,
             Mode::CountDown => true,
         }
     }
@@ -76,7 +75,7 @@ fn main() -> ! {
     let mut button_b = board.buttons.button_b;
 
     let mut state: AppState = AppState {
-        mode: Mode::Menue,
+        mode: Mode::Menu,
         countdown_minutes: 5,
     };
     let mut second_indicator_on: bool = false;
@@ -147,14 +146,14 @@ fn render_state(state: &AppState) -> types::LedMatrix {
 
 fn handle_minute_passing(state: AppState) -> AppState {
     match state.mode {
-        Mode::Menue => state,
+        Mode::Menu => state,
         Mode::CountDown => state.decrement_minute(),
     }
 }
 
 fn handle_action(state: AppState, action: Action) -> AppState {
     match state.mode {
-        Mode::Menue => match action {
+        Mode::Menu => match action {
             Action::IncTimer => state.increment_minute(),
             Action::DecTimer => state.decrement_minute(),
             Action::StartTimer => AppState {
@@ -165,7 +164,7 @@ fn handle_action(state: AppState, action: Action) -> AppState {
         },
         Mode::CountDown => match action {
             Action::Reset => AppState {
-                mode: Mode::Menue,
+                mode: Mode::Menu,
                 countdown_minutes: 5,
             },
             _ => state,
@@ -175,7 +174,7 @@ fn handle_action(state: AppState, action: Action) -> AppState {
 
 fn infer_action(mode: Mode, button_a_pressed: bool, button_b_pressed: bool) -> Action {
     match mode {
-        Mode::Menue => match (button_a_pressed, button_b_pressed) {
+        Mode::Menu => match (button_a_pressed, button_b_pressed) {
             (true, true) => Action::StartTimer,
             (true, false) => Action::DecTimer,
             (false, true) => Action::IncTimer,
