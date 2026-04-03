@@ -14,13 +14,15 @@ use embedded_hal::digital::InputPin;
 use microbit::{
     Board,
     board::Buttons,
+    display::nonblocking::{BitImage, Display},
     hal::{
+        Timer,
         clocks::Clocks,
         gpio::{Floating, Input, Pin},
         gpiote::Gpiote,
         rtc::{Rtc, RtcInterrupt},
     },
-    pac::{GPIOTE, Interrupt, RTC0, interrupt},
+    pac::{GPIOTE, Interrupt, RTC0, TIMER1, interrupt},
 };
 // Marks `main` as the reset handler for Cortex-M.
 use panic_halt as _; // On panic, halt the processor (stops execution).
@@ -72,6 +74,54 @@ impl AppState {
             },
         }
     }
+
+    fn render(&self) -> BitImage {
+        let minutes = self.seconds_remaining / 60;
+        if minutes > 99 {
+            return BitImage::new(&symbols::CROSS);
+        }
+        let tens = (minutes / 10) as usize;
+        let ones = (minutes % 10) as usize;
+
+        let mut grid = [[0u8; 5]; 5];
+
+        // cols 0,1: fill top-to-bottom, left-to-right for `tens`
+        let mut rem = tens;
+        'tens: for col in 0..2 {
+            for row in 0..5 {
+                if rem == 0 {
+                    break 'tens;
+                }
+                grid[row][col] = 1;
+                rem -= 1;
+            }
+        }
+
+        // cols 4,3: fill top-to-bottom, right-to-left for `ones`
+        let mut rem = ones;
+        'ones: for col in [4, 3] {
+            for row in 0..5 {
+                if rem == 0 {
+                    break 'ones;
+                }
+                grid[row][col] = 1;
+                rem -= 1;
+            }
+        }
+
+        match self.stage {
+            Stage::Menu => {}
+            Stage::Countdown => {
+                if self.seconds_remaining.is_multiple_of(2) {
+                    grid[1][2] = 1;
+                    grid[3][2] = 1;
+                }
+            }
+        }
+
+        BitImage::new(&grid)
+    }
+
     fn tick_second(&mut self) {
         match self.stage {
             Stage::Menu => {}
@@ -90,6 +140,7 @@ type ButtonPin = Pin<Input<Floating>>;
 static BUTTONS: Mutex<RefCell<Option<(ButtonPin, ButtonPin)>>> = Mutex::new(RefCell::new(None));
 static APP_STATE: Mutex<RefCell<Option<AppState>>> = Mutex::new(RefCell::new(None));
 static RTC: Mutex<RefCell<Option<Rtc<RTC0>>>> = Mutex::new(RefCell::new(None));
+static DISPLAY: Mutex<RefCell<Option<Display<TIMER1>>>> = Mutex::new(RefCell::new(None));
 
 // `#[entry]` replaces the standard `main`; `-> !` means this function never returns.
 #[entry]
@@ -98,10 +149,23 @@ fn main() -> ! {
     let board = Board::take().unwrap();
     Clocks::new(board.CLOCK).start_lfclk();
     setup_rtc(board.RTC0);
+    setup_display(board.TIMER1, board.display_pins);
     setup_gpiote(board.GPIOTE, board.buttons);
     loop {
         cortex_m::asm::wfi();
     }
+}
+
+fn setup_display(timer1: TIMER1, display_pins: microbit::gpio::DisplayPins) {
+    let mut display = Display::new(timer1, display_pins);
+    display.show(&BitImage::new(&symbols::BLANK));
+
+    cortex_m::interrupt::free(|cs| {
+        unsafe {
+            cortex_m::peripheral::NVIC::unmask(Interrupt::TIMER1);
+        }
+        DISPLAY.borrow(cs).replace(Some(display));
+    });
 }
 
 fn setup_rtc(rtc0: RTC0) {
@@ -148,17 +212,29 @@ fn setup_gpiote(gpiote_periph: GPIOTE, buttons: Buttons) {
     });
 }
 
+// driven by TIMER1 — multiplexes the LED matrix rows
+#[interrupt]
+fn TIMER1() {
+    cortex_m::interrupt::free(|cs| {
+        if let Some(display) = DISPLAY.borrow(cs).borrow_mut().as_mut() {
+            display.handle_display_event();
+        }
+    });
+}
+
 // once per sec
 #[interrupt]
 fn RTC0() {
     cortex_m::interrupt::free(|cs| {
-        if let (Some(rtc), Some(app_state)) = (
+        if let (Some(rtc), Some(app_state), Some(display)) = (
             RTC.borrow(cs).borrow().as_ref(),
             APP_STATE.borrow(cs).borrow_mut().as_mut(),
+            DISPLAY.borrow(cs).borrow_mut().as_mut(),
         ) && rtc.is_event_triggered(RtcInterrupt::Tick)
         {
             rtc.reset_event(RtcInterrupt::Tick);
             app_state.tick_second();
+            display.show(&app_state.render());
         }
     });
 }
@@ -176,15 +252,21 @@ fn GPIOTE() {
             let a_pressed = btn_a.is_low().unwrap();
             let b_pressed = btn_b.is_low().unwrap();
 
+            let mut changed = false;
             if gpiote.channel1().is_event_triggered() {
                 gpiote.channel1().reset_events();
-                // button_a pressed
                 app_state.handle_button_pressed(a_pressed, b_pressed);
+                changed = true;
             }
             if gpiote.channel2().is_event_triggered() {
                 gpiote.channel2().reset_events();
-                // button_b pressed
                 app_state.handle_button_pressed(a_pressed, b_pressed);
+                changed = true;
+            }
+            if changed {
+                if let Some(display) = DISPLAY.borrow(cs).borrow_mut().as_mut() {
+                    display.show(&app_state.render());
+                }
             }
         }
     });
