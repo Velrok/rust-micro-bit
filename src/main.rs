@@ -21,8 +21,9 @@ use microbit::{
         gpio::{Floating, Input, Pin},
         gpiote::Gpiote,
         rtc::{Rtc, RtcInterrupt},
+        timer::OneShot,
     },
-    pac::{GPIOTE, Interrupt, RTC0, TIMER1, interrupt},
+    pac::{GPIOTE, Interrupt, RTC0, TIMER0, TIMER1, interrupt},
 };
 // Marks `main` as the reset handler for Cortex-M.
 use panic_halt as _; // On panic, halt the processor (stops execution).
@@ -141,6 +142,8 @@ static BUTTONS: Mutex<RefCell<Option<(ButtonPin, ButtonPin)>>> = Mutex::new(RefC
 static APP_STATE: Mutex<RefCell<Option<AppState>>> = Mutex::new(RefCell::new(None));
 static RTC: Mutex<RefCell<Option<Rtc<RTC0>>>> = Mutex::new(RefCell::new(None));
 static DISPLAY: Mutex<RefCell<Option<Display<TIMER1>>>> = Mutex::new(RefCell::new(None));
+static DEBOUNCE_TIMER: Mutex<RefCell<Option<Timer<TIMER0, OneShot>>>> =
+    Mutex::new(RefCell::new(None));
 
 // `#[entry]` replaces the standard `main`; `-> !` means this function never returns.
 #[entry]
@@ -150,6 +153,7 @@ fn main() -> ! {
     Clocks::new(board.CLOCK).start_lfclk();
     setup_rtc(board.RTC0);
     setup_display(board.TIMER1, board.display_pins);
+    setup_debounce_timer(board.TIMER0);
     setup_gpiote(board.GPIOTE, board.buttons);
     loop {
         cortex_m::asm::wfi();
@@ -179,6 +183,15 @@ fn setup_rtc(rtc0: RTC0) {
             cortex_m::peripheral::NVIC::unmask(Interrupt::RTC0);
         }
         RTC.borrow(cs).replace(Some(rtc));
+    });
+}
+
+fn setup_debounce_timer(timer0: TIMER0) {
+    let mut timer = Timer::one_shot(timer0);
+    timer.enable_interrupt();
+    cortex_m::interrupt::free(|cs| {
+        // TIMER0 interrupt stays masked until first button press
+        DEBOUNCE_TIMER.borrow(cs).replace(Some(timer));
     });
 }
 
@@ -239,34 +252,54 @@ fn RTC0() {
     });
 }
 
-// on button click
+// on button edge — start debounce timer, suppress further GPIOTE events
 #[interrupt]
 fn GPIOTE() {
     cortex_m::interrupt::free(|cs| {
-        if let (Some(gpiote), Some(buttons), Some(app_state)) = (
+        if let (Some(gpiote), Some(timer)) = (
             GPIOTE_PERIPH.borrow(cs).borrow().as_ref(),
+            DEBOUNCE_TIMER.borrow(cs).borrow_mut().as_mut(),
+        ) {
+            gpiote.channel1().reset_events();
+            gpiote.channel2().reset_events();
+
+            // mask GPIOTE until debounce window expires
+            cortex_m::peripheral::NVIC::mask(Interrupt::GPIOTE);
+
+            // start 50ms one-shot (timer runs at 1 MHz = 1 cycle/µs)
+            timer.start(50_000u32);
+            unsafe {
+                cortex_m::peripheral::NVIC::unmask(Interrupt::TIMER0);
+            }
+        }
+    });
+}
+
+// debounce window expired — read settled pin state and process
+#[interrupt]
+fn TIMER0() {
+    cortex_m::interrupt::free(|cs| {
+        if let (Some(timer), Some(buttons), Some(app_state), Some(display)) = (
+            DEBOUNCE_TIMER.borrow(cs).borrow_mut().as_mut(),
             BUTTONS.borrow(cs).borrow_mut().as_mut(),
             APP_STATE.borrow(cs).borrow_mut().as_mut(),
+            DISPLAY.borrow(cs).borrow_mut().as_mut(),
         ) {
-            let (btn_a, btn_b) = buttons;
-            let a_pressed = btn_a.is_low().unwrap();
-            let b_pressed = btn_b.is_low().unwrap();
+            timer.reset_event();
+            cortex_m::peripheral::NVIC::mask(Interrupt::TIMER0);
 
-            let mut changed = false;
-            if gpiote.channel1().is_event_triggered() {
-                gpiote.channel1().reset_events();
-                app_state.handle_button_pressed(a_pressed, b_pressed);
-                changed = true;
+            let (btn_a, btn_b) = buttons;
+            let a = btn_a.is_low().unwrap();
+            let b = btn_b.is_low().unwrap();
+
+            if a || b {
+                app_state.handle_button_pressed(a, b);
+                display.show(&app_state.render());
             }
-            if gpiote.channel2().is_event_triggered() {
-                gpiote.channel2().reset_events();
-                app_state.handle_button_pressed(a_pressed, b_pressed);
-                changed = true;
-            }
-            if changed {
-                if let Some(display) = DISPLAY.borrow(cs).borrow_mut().as_mut() {
-                    display.show(&app_state.render());
-                }
+
+            // re-enable button interrupts
+            unsafe {
+                cortex_m::peripheral::NVIC::unmask(Interrupt::GPIOTE);
             }
         }
     });
