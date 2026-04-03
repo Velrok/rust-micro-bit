@@ -7,184 +7,113 @@ mod digits;
 mod symbols;
 mod types;
 
-use cortex_m_rt::entry; // Marks `main` as the reset handler for Cortex-M.
+use core::cell::RefCell;
+use cortex_m::interrupt::Mutex;
+use cortex_m_rt::entry;
 use embedded_hal::digital::InputPin;
-// use microbit::hal::gpio::{p0::P0_14, p0::P0_23, Floating, Input};
-use microbit::{board::Board, display::blocking::Display, hal::Timer};
+use microbit::{
+    Board,
+    hal::{
+        gpio::{Floating, Input, Pin},
+        gpiote::Gpiote,
+    },
+    pac::{Interrupt, interrupt},
+};
+// Marks `main` as the reset handler for Cortex-M.
 use panic_halt as _; // On panic, halt the processor (stops execution).
 
-#[derive(Copy, Clone)]
-enum Mode {
-    Menu,
-    CountDown,
-}
-
-#[derive(Copy, Clone)]
-enum Action {
-    IncTimer,
-    DecTimer,
-    StartTimer,
-    None,
-    Reset,
+enum Stage {
+    Menue,
+    Countdown,
 }
 
 struct AppState {
-    mode: Mode,
-    countdown_minutes: usize,
+    stage: Stage,
+    // buttons: (bool, bool),
 }
 
 impl AppState {
-    // TODO: button debounce — raw is_low() polling causes multiple triggers on a single press;
-    //       track previous button state and only act on rising/falling edge transitions.
-
-    fn decrement_minute(self) -> AppState {
-        if self.countdown_minutes > 0 {
-            AppState {
-                countdown_minutes: self.countdown_minutes - 1,
-                ..self
-            }
-        } else {
-            self
-        }
+    fn static new() -> Self {
     }
 
-    fn increment_minute(self) -> AppState {
-        AppState {
-            countdown_minutes: (self.countdown_minutes + 1).clamp(0, 60),
-            ..self
-        }
-    }
-
-    fn timer_started(&self) -> bool {
-        match self.mode {
-            Mode::Menu => false,
-            Mode::CountDown => true,
-        }
+    fn handle_button_pressed(&mut self, a: bool, b: bool) {
+        // self.buttons = (a, b);
     }
 }
 
-// type ButtonA = P0_14<Input<Floating>>;
-// type ButtonB = P0_23<Input<Floating>>;
+// static BOARD: Mutex<RefCell<Option<Board>>> = Mutex::new(RefCell::new(None));
+static GPIOTE_PERIPH: Mutex<RefCell<Option<Gpiote>>> = Mutex::new(RefCell::new(None));
+type ButtonPin = Pin<Input<Floating>>;
+static BUTTONS: Mutex<RefCell<Option<(ButtonPin, ButtonPin)>>> = Mutex::new(RefCell::new(None));
+static APP_STATE: Mutex<RefCell<Option<AppState>>> = Mutex::new(RefCell::new(None));
 
 // `#[entry]` replaces the standard `main`; `-> !` means this function never returns.
 #[entry]
 fn main() -> ! {
-    // Take ownership of all board peripherals (can only be called once).
+    cortex_m::interrupt::free(|cs| {
+        APP_STATE.borrow(cs).replace(Some(AppState {
+            buttons: (false, false),
+        }))
+    });
     let board = Board::take().unwrap();
-    let mut button_a = board.buttons.button_a;
-    let mut button_b = board.buttons.button_b;
-
-    let mut state: AppState = AppState {
-        mode: Mode::Menu,
-        countdown_minutes: 5,
-    };
-    let mut second_indicator_on: bool = false;
-
-    // // Wrap TIMER0 peripheral for use as a blocking delay source.
-    let mut timer = Timer::new(board.TIMER0);
-    // // Initialise the 5×5 LED matrix via its GPIO pins.
-    let mut display = Display::new(board.display_pins);
-    display.clear();
-
-    const PAUSE: u32 = 200;
-    const ONE_SECOND: u32 = 1000;
-    const ONE_MINUTE: u32 = ONE_SECOND * 60;
-    let mut minute_tracker: u32 = 0;
-    let mut second_tracker: u32 = 0;
-
-    let mut display_buffer;
-
+    setup_gpiote(board);
     loop {
-        let action = infer_action(
-            state.mode,
-            button_a.is_low().unwrap(),
-            button_b.is_low().unwrap(),
-        );
-        state = handle_action(state, action);
+        cortex_m::asm::wfi();
+    }
+}
 
-        display_buffer = render_state(&state);
+fn setup_gpiote(board: Board) -> () {
+    let gpiote = Gpiote::new(board.GPIOTE);
 
-        // TODO: timing drift — accumulating PAUSE per loop assumes display.show() takes exactly
-        //       PAUSE ms, but any jitter causes clock skew. Consider using timer.read() for
-        //       elapsed time instead of loop-count accumulation.
-        minute_tracker += PAUSE;
-        if minute_tracker >= ONE_MINUTE {
-            minute_tracker = 0;
-            state = handle_minute_passing(state);
+    let btn_a = board.buttons.button_a.degrade();
+    let btn_b = board.buttons.button_b.degrade();
+
+    // setup chan1 for button_a hi to low
+    gpiote
+        .channel1()
+        .input_pin(&btn_a)
+        .hi_to_lo()
+        .enable_interrupt();
+
+    // setup chan2 for button_b hi to low
+    gpiote
+        .channel2()
+        .input_pin(&btn_b)
+        .hi_to_lo()
+        .enable_interrupt();
+
+    cortex_m::interrupt::free(|cs| {
+        // unmask GPIOTE interrupt
+        unsafe {
+            cortex_m::peripheral::NVIC::unmask(Interrupt::GPIOTE);
         }
+        GPIOTE_PERIPH.borrow(cs).replace(Some(gpiote));
+        BUTTONS.borrow(cs).replace(Some((btn_a, btn_b)));
+    });
+}
 
-        second_tracker += PAUSE;
-        if second_tracker >= ONE_SECOND {
-            second_indicator_on = !second_indicator_on;
-            second_tracker = 0;
+#[interrupt]
+fn GPIOTE() {
+    cortex_m::interrupt::free(|cs| {
+        if let (Some(gpiote), Some(buttons), Some(app_state)) = (
+            GPIOTE_PERIPH.borrow(cs).borrow().as_ref(),
+            BUTTONS.borrow(cs).borrow_mut().as_mut(),
+            APP_STATE.borrow(cs).borrow_mut().as_mut(),
+        ) {
+            let (btn_a, btn_b) = buttons;
+            let a_pressed = btn_a.is_low().unwrap();
+            let b_pressed = btn_b.is_low().unwrap();
+
+            if gpiote.channel1().is_event_triggered() {
+                gpiote.channel1().reset_events();
+                // button_a pressed
+                app_state.handle_button_pressed(a_pressed, b_pressed);
+            }
+            if gpiote.channel2().is_event_triggered() {
+                gpiote.channel2().reset_events();
+                // button_b pressed
+                app_state.handle_button_pressed(a_pressed, b_pressed);
+            }
         }
-
-        if second_indicator_on && state.timer_started() {
-            display_buffer = overlay(display_buffer, symbols::CORNERS);
-        }
-
-        display.show(&mut timer, display_buffer, PAUSE);
-    }
-}
-
-fn overlay(buff1: types::LedMatrix, buff2: types::LedMatrix) -> types::LedMatrix {
-    let mut result = [[0u8; 5]; 5];
-    for row in 0..5 {
-        for col in 0..5 {
-            result[row][col] = buff1[row][col] | buff2[row][col];
-        }
-    }
-    result
-}
-
-fn render_state(state: &AppState) -> types::LedMatrix {
-    match digits::DIGITS.get(state.countdown_minutes) {
-        Some(&glyph) => glyph,
-        None => symbols::CROSS,
-    }
-}
-
-fn handle_minute_passing(state: AppState) -> AppState {
-    match state.mode {
-        Mode::Menu => state,
-        Mode::CountDown => state.decrement_minute(),
-    }
-}
-
-fn handle_action(state: AppState, action: Action) -> AppState {
-    match state.mode {
-        Mode::Menu => match action {
-            Action::IncTimer => state.increment_minute(),
-            Action::DecTimer => state.decrement_minute(),
-            Action::StartTimer => AppState {
-                mode: Mode::CountDown,
-                ..state
-            },
-            _ => state,
-        },
-        Mode::CountDown => match action {
-            Action::Reset => AppState {
-                mode: Mode::Menu,
-                countdown_minutes: 5,
-            },
-            _ => state,
-        },
-    }
-}
-
-fn infer_action(mode: Mode, button_a_pressed: bool, button_b_pressed: bool) -> Action {
-    match mode {
-        Mode::Menu => match (button_a_pressed, button_b_pressed) {
-            (true, true) => Action::StartTimer,
-            (true, false) => Action::DecTimer,
-            (false, true) => Action::IncTimer,
-            (false, false) => Action::None,
-        },
-        Mode::CountDown => match (button_a_pressed, button_b_pressed) {
-            (true, true) => Action::Reset,
-            (true, false) => Action::None,
-            (false, true) => Action::None,
-            (false, false) => Action::None,
-        },
-    }
+    });
 }
