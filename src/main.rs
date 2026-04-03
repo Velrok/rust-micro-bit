@@ -23,21 +23,49 @@ use microbit::{
 use panic_halt as _; // On panic, halt the processor (stops execution).
 
 enum Stage {
-    Menue,
+    Menu,
     Countdown,
 }
 
 struct AppState {
     stage: Stage,
+    minutes_remaining: u32,
     // buttons: (bool, bool),
 }
 
 impl AppState {
-    fn static new() -> Self {
+    const fn new() -> Self {
+        AppState {
+            stage: Stage::Menu,
+            minutes_remaining: 5,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.stage = Stage::Menu;
+        self.minutes_remaining = 5;
     }
 
     fn handle_button_pressed(&mut self, a: bool, b: bool) {
         // self.buttons = (a, b);
+        match self.stage {
+            Stage::Menu => match (a, b) {
+                (true, true) => self.stage = Stage::Countdown,
+                (true, false) => {
+                    if self.minutes_remaining > 0 {
+                        self.minutes_remaining -= 1;
+                    }
+                }
+                (false, true) => self.minutes_remaining += 1,
+                (false, false) => {}
+            },
+            Stage::Countdown => match (a, b) {
+                (true, true) => self.reset(),
+                (true, false) => {}
+                (false, true) => {}
+                (false, false) => {}
+            },
+        }
     }
 }
 
@@ -50,11 +78,7 @@ static APP_STATE: Mutex<RefCell<Option<AppState>>> = Mutex::new(RefCell::new(Non
 // `#[entry]` replaces the standard `main`; `-> !` means this function never returns.
 #[entry]
 fn main() -> ! {
-    cortex_m::interrupt::free(|cs| {
-        APP_STATE.borrow(cs).replace(Some(AppState {
-            buttons: (false, false),
-        }))
-    });
+    cortex_m::interrupt::free(|cs| APP_STATE.borrow(cs).replace(Some(AppState::new())));
     let board = Board::take().unwrap();
     setup_gpiote(board);
     loop {
