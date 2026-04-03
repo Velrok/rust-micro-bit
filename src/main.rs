@@ -13,11 +13,14 @@ use cortex_m_rt::entry;
 use embedded_hal::digital::InputPin;
 use microbit::{
     Board,
+    board::Buttons,
     hal::{
+        clocks::Clocks,
         gpio::{Floating, Input, Pin},
         gpiote::Gpiote,
+        rtc::{Rtc, RtcInterrupt},
     },
-    pac::{Interrupt, interrupt},
+    pac::{GPIOTE, Interrupt, RTC0, interrupt},
 };
 // Marks `main` as the reset handler for Cortex-M.
 use panic_halt as _; // On panic, halt the processor (stops execution).
@@ -29,21 +32,23 @@ enum Stage {
 
 struct AppState {
     stage: Stage,
-    minutes_remaining: u32,
+    seconds_remaining: u32,
     // buttons: (bool, bool),
 }
+
+const DEFAULT_TIMER_SEC: u32 = 5 * 60;
 
 impl AppState {
     const fn new() -> Self {
         AppState {
             stage: Stage::Menu,
-            minutes_remaining: 5,
+            seconds_remaining: DEFAULT_TIMER_SEC,
         }
     }
 
     fn reset(&mut self) {
         self.stage = Stage::Menu;
-        self.minutes_remaining = 5;
+        self.seconds_remaining = DEFAULT_TIMER_SEC;
     }
 
     fn handle_button_pressed(&mut self, a: bool, b: bool) {
@@ -52,11 +57,11 @@ impl AppState {
             Stage::Menu => match (a, b) {
                 (true, true) => self.stage = Stage::Countdown,
                 (true, false) => {
-                    if self.minutes_remaining > 0 {
-                        self.minutes_remaining -= 1;
+                    if self.seconds_remaining > 0 {
+                        self.seconds_remaining -= 1;
                     }
                 }
-                (false, true) => self.minutes_remaining += 1,
+                (false, true) => self.seconds_remaining += 1,
                 (false, false) => {}
             },
             Stage::Countdown => match (a, b) {
@@ -67,6 +72,16 @@ impl AppState {
             },
         }
     }
+    fn tick_second(&mut self) {
+        match self.stage {
+            Stage::Menu => {}
+            Stage::Countdown => {
+                if self.seconds_remaining > 0 {
+                    self.seconds_remaining -= 1;
+                }
+            }
+        }
+    }
 }
 
 // static BOARD: Mutex<RefCell<Option<Board>>> = Mutex::new(RefCell::new(None));
@@ -74,23 +89,40 @@ static GPIOTE_PERIPH: Mutex<RefCell<Option<Gpiote>>> = Mutex::new(RefCell::new(N
 type ButtonPin = Pin<Input<Floating>>;
 static BUTTONS: Mutex<RefCell<Option<(ButtonPin, ButtonPin)>>> = Mutex::new(RefCell::new(None));
 static APP_STATE: Mutex<RefCell<Option<AppState>>> = Mutex::new(RefCell::new(None));
+static RTC: Mutex<RefCell<Option<Rtc<RTC0>>>> = Mutex::new(RefCell::new(None));
 
 // `#[entry]` replaces the standard `main`; `-> !` means this function never returns.
 #[entry]
 fn main() -> ! {
     cortex_m::interrupt::free(|cs| APP_STATE.borrow(cs).replace(Some(AppState::new())));
     let board = Board::take().unwrap();
-    setup_gpiote(board);
+    Clocks::new(board.CLOCK).start_lfclk();
+    setup_rtc(board.RTC0);
+    setup_gpiote(board.GPIOTE, board.buttons);
     loop {
         cortex_m::asm::wfi();
     }
 }
 
-fn setup_gpiote(board: Board) -> () {
-    let gpiote = Gpiote::new(board.GPIOTE);
+fn setup_rtc(rtc0: RTC0) {
+    // fRTC = 32_768 / (prescaler + 1) => prescaler = 32767 gives 1 Hz
+    let mut rtc = Rtc::new(rtc0, 32767).unwrap();
+    rtc.enable_interrupt(RtcInterrupt::Tick, None);
+    rtc.enable_counter();
 
-    let btn_a = board.buttons.button_a.degrade();
-    let btn_b = board.buttons.button_b.degrade();
+    cortex_m::interrupt::free(|cs| {
+        unsafe {
+            cortex_m::peripheral::NVIC::unmask(Interrupt::RTC0);
+        }
+        RTC.borrow(cs).replace(Some(rtc));
+    });
+}
+
+fn setup_gpiote(gpiote_periph: GPIOTE, buttons: Buttons) {
+    let gpiote = Gpiote::new(gpiote_periph);
+
+    let btn_a = buttons.button_a.degrade();
+    let btn_b = buttons.button_b.degrade();
 
     // setup chan1 for button_a hi to low
     gpiote
@@ -116,6 +148,22 @@ fn setup_gpiote(board: Board) -> () {
     });
 }
 
+// once per sec
+#[interrupt]
+fn RTC0() {
+    cortex_m::interrupt::free(|cs| {
+        if let (Some(rtc), Some(app_state)) = (
+            RTC.borrow(cs).borrow().as_ref(),
+            APP_STATE.borrow(cs).borrow_mut().as_mut(),
+        ) && rtc.is_event_triggered(RtcInterrupt::Tick)
+        {
+            rtc.reset_event(RtcInterrupt::Tick);
+            app_state.tick_second();
+        }
+    });
+}
+
+// on button click
 #[interrupt]
 fn GPIOTE() {
     cortex_m::interrupt::free(|cs| {
