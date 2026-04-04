@@ -68,7 +68,7 @@ impl AppState {
 
     fn dec_timer(&mut self) {
         rprintln!("dec_timer");
-        if (self.seconds_remaining > ONE_MINUTE) {
+        if self.seconds_remaining > ONE_MINUTE {
             self.seconds_remaining -= ONE_MINUTE;
         }
     }
@@ -94,43 +94,6 @@ impl AppState {
                 }
             }
         }
-    }
-
-    fn render_menu(&self) -> BitImage {
-        let minutes = self.seconds_remaining / 60;
-        if minutes > 99 {
-            return BitImage::new(&symbols::CROSS);
-        }
-        let tens = (minutes / 10) as usize;
-        let ones = (minutes % 10) as usize;
-
-        let mut grid = [[0u8; 5]; 5];
-
-        // cols 0,1: fill top-to-bottom, left-to-right for `tens`
-        let mut rem = tens;
-        'tens: for col in 0..2 {
-            for row in 0..5 {
-                if rem == 0 {
-                    break 'tens;
-                }
-                grid[row][col] = 1;
-                rem -= 1;
-            }
-        }
-
-        // cols 4,3: fill top-to-bottom, right-to-left for `ones`
-        let mut rem = ones;
-        'ones: for col in [4, 3] {
-            for row in 0..5 {
-                if rem == 0 {
-                    break 'ones;
-                }
-                grid[row][col] = 1;
-                rem -= 1;
-            }
-        }
-
-        BitImage::new(&grid)
     }
 
     fn render_countdown(&self) -> BitImage {
@@ -188,14 +151,11 @@ impl AppState {
             }
         }
 
-        match self.stage {
-            Stage::Countdown => {
-                if self.seconds_remaining.is_multiple_of(2) {
-                    grid[1][2] = 1;
-                    grid[3][2] = 1;
-                }
-            }
-            _ => {}
+        if let Stage::Countdown = self.stage
+            && self.seconds_remaining.is_multiple_of(2)
+        {
+            grid[1][2] = 1;
+            grid[3][2] = 1;
         }
 
         BitImage::new(&grid)
