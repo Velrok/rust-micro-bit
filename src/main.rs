@@ -25,9 +25,8 @@ use microbit::{
     },
     pac::{GPIOTE, Interrupt, RTC0, TIMER0, TIMER1, interrupt},
 };
-use rtt_target::{rprintln, rtt_init_print};
-// Marks `main` as the reset handler for Cortex-M.
-use panic_halt as _; // On panic, halt the processor (stops execution).
+use panic_halt as _;
+use rtt_target::{rprintln, rtt_init_print}; // On panic, halt the processor (stops execution).
 
 enum Stage {
     Menu,
@@ -38,7 +37,6 @@ enum Stage {
 struct AppState {
     stage: Stage,
     seconds_remaining: u32,
-    // buttons: (bool, bool),
 }
 
 const ONE_MINUTE: u32 = 60;
@@ -192,10 +190,11 @@ impl AppState {
     }
 }
 
-// static BOARD: Mutex<RefCell<Option<Board>>> = Mutex::new(RefCell::new(None));
 static GPIOTE_PERIPH: Mutex<RefCell<Option<Gpiote>>> = Mutex::new(RefCell::new(None));
+
 type ButtonPin = Pin<Input<Floating>>;
 static BUTTONS: Mutex<RefCell<Option<(ButtonPin, ButtonPin)>>> = Mutex::new(RefCell::new(None));
+
 static APP_STATE: Mutex<RefCell<Option<AppState>>> = Mutex::new(RefCell::new(None));
 static RTC: Mutex<RefCell<Option<Rtc<RTC0>>>> = Mutex::new(RefCell::new(None));
 static DISPLAY: Mutex<RefCell<Option<Display<TIMER1>>>> = Mutex::new(RefCell::new(None));
@@ -207,19 +206,27 @@ static DEBOUNCE_TIMER: Mutex<RefCell<Option<Timer<TIMER0, OneShot>>>> =
 fn main() -> ! {
     rtt_init_print!();
     rprintln!("booting...");
+
     cortex_m::interrupt::free(|cs| APP_STATE.borrow(cs).replace(Some(AppState::new())));
     rprintln!("app state initialised");
+
     let board = Board::take().unwrap();
+
     Clocks::new(board.CLOCK).start_lfclk();
     rprintln!("lfclk started");
+
     setup_rtc(board.RTC0);
     rprintln!("rtc ready");
+
     setup_display(board.TIMER1, board.display_pins);
     rprintln!("display ready");
+
     setup_debounce_timer(board.TIMER0);
     rprintln!("debounce timer ready");
+
     setup_gpiote(board.GPIOTE, board.buttons);
     rprintln!("gpiote ready — entering loop");
+
     loop {
         cortex_m::asm::wfi();
     }
@@ -254,6 +261,9 @@ fn setup_rtc(rtc0: RTC0) {
 }
 
 fn setup_debounce_timer(timer0: TIMER0) {
+    // OneShot mode: timer counts up once, fires CC[0] event, then stops.
+    // We enable the interrupt here but keep it masked in the NVIC — it will
+    // only be unmasked by the GPIOTE handler when a press is detected.
     let mut timer = Timer::one_shot(timer0);
     timer.enable_interrupt();
     cortex_m::interrupt::free(|cs| {
@@ -265,17 +275,19 @@ fn setup_debounce_timer(timer0: TIMER0) {
 fn setup_gpiote(gpiote_periph: GPIOTE, buttons: Buttons) {
     let gpiote = Gpiote::new(gpiote_periph);
 
+    // Buttons are active-low: pin is pulled high at rest, goes low when pressed.
+    // We degrade the typed pin to an erased `Pin` so both buttons share one type.
     let btn_a = buttons.button_a.degrade();
     let btn_b = buttons.button_b.degrade();
 
-    // setup chan1 for button_a hi to low
+    // hi_to_lo = falling edge = button press event.
+    // Each channel watches one pin and raises the GPIOTE interrupt on that edge.
     gpiote
         .channel1()
         .input_pin(&btn_a)
         .hi_to_lo()
         .enable_interrupt();
 
-    // setup chan2 for button_b hi to low
     gpiote
         .channel2()
         .input_pin(&btn_b)
@@ -313,7 +325,10 @@ fn RTC0() {
         ) && rtc.is_event_triggered(RtcInterrupt::Compare0)
         {
             rtc.reset_event(RtcInterrupt::Compare0);
-            // advance CC0 by 32768 for the next 1-second trigger
+            // Schedule the next 1-second tick by advancing the compare value.
+            // The RTC counter is 24-bit (max 0x00FF_FFFF = 16_777_215), so we
+            // mask with 0x00FF_FFFF to wrap around correctly instead of
+            // overflowing into bits the hardware ignores.
             let next = (rtc.get_counter() + 32768) & 0x00FF_FFFF;
             rtc.set_compare(RtcCompareReg::Compare0, next).ok();
             app_state.tick_second();
@@ -322,7 +337,14 @@ fn RTC0() {
     });
 }
 
-// on button edge — start debounce timer, suppress further GPIOTE events
+// GPIOTE fires on the first falling edge (button press).
+//
+// Debounce strategy — interrupt suppression window:
+//   1. Clear the edge events so the interrupt doesn't re-fire immediately.
+//   2. Mask GPIOTE in the NVIC — no more button interrupts until we re-enable it.
+//   3. Start TIMER0 as a 50 ms one-shot. While it counts, any mechanical bounce
+//      on the pin is completely ignored because GPIOTE is masked.
+//   4. When TIMER0 fires the pin has settled; TIMER0 handler reads the final state.
 #[interrupt]
 fn GPIOTE() {
     cortex_m::interrupt::free(|cs| {
@@ -330,14 +352,19 @@ fn GPIOTE() {
             GPIOTE_PERIPH.borrow(cs).borrow().as_ref(),
             DEBOUNCE_TIMER.borrow(cs).borrow_mut().as_mut(),
         ) {
+            // Clear pending events on both channels so the GPIOTE interrupt
+            // doesn't re-trigger the moment we return from this handler.
             gpiote.channel1().reset_events();
             gpiote.channel2().reset_events();
 
-            // mask GPIOTE until debounce window expires
+            // Mask GPIOTE in the NVIC — suppresses all further button edges
+            // for the duration of the debounce window.
             cortex_m::peripheral::NVIC::mask(Interrupt::GPIOTE);
 
-            // start 50ms one-shot (timer runs at 1 MHz = 1 cycle/µs)
+            // Start 50 ms one-shot. TIMER0 runs at 1 MHz (1 tick = 1 µs),
+            // so 50_000 ticks = 50 ms — long enough to outlast contact bounce.
             timer.start(50_000u32);
+            // Unmask TIMER0 so its CC[0] event can wake us when the window ends.
             unsafe {
                 cortex_m::peripheral::NVIC::unmask(Interrupt::TIMER0);
             }
@@ -345,7 +372,8 @@ fn GPIOTE() {
     });
 }
 
-// debounce window expired — read settled pin state and process
+// TIMER0 fires when the 50 ms debounce window has elapsed.
+// The pins have had time to settle, so we can now safely read them.
 #[interrupt]
 fn TIMER0() {
     cortex_m::interrupt::free(|cs| {
@@ -355,19 +383,25 @@ fn TIMER0() {
             APP_STATE.borrow(cs).borrow_mut().as_mut(),
             DISPLAY.borrow(cs).borrow_mut().as_mut(),
         ) {
+            // Acknowledge the timer event and mask TIMER0 again — it has no
+            // further work to do until the next button press.
             timer.reset_event();
             cortex_m::peripheral::NVIC::mask(Interrupt::TIMER0);
 
+            // Read settled pin levels. Buttons are active-low, so `is_low`
+            // returns true when the button is still held at this moment.
             let (btn_a, btn_b) = buttons;
             let a = btn_a.is_low().unwrap();
             let b = btn_b.is_low().unwrap();
 
+            // Only act if at least one button is still down — this discards
+            // phantom triggers caused by pure noise that resolved to no press.
             if a || b {
                 app_state.handle_button_pressed(a, b);
                 display.show(&app_state.render());
             }
 
-            // re-enable button interrupts
+            // Re-arm GPIOTE so the next button press can start a new debounce cycle.
             unsafe {
                 cortex_m::peripheral::NVIC::unmask(Interrupt::GPIOTE);
             }
