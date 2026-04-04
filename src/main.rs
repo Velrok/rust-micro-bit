@@ -32,7 +32,7 @@ use panic_halt as _; // On panic, halt the processor (stops execution).
 enum Stage {
     Menu,
     Countdown,
-    Fin,
+    Fin(bool),
 }
 
 struct AppState {
@@ -88,7 +88,7 @@ impl AppState {
                 (false, false) => {}
             },
             Stage::Countdown => {}
-            Stage::Fin => {
+            Stage::Fin(_) => {
                 if a || b {
                     self.reset()
                 }
@@ -141,6 +141,20 @@ impl AppState {
                 None => BitImage::new(&symbols::CROSS),
             };
         }
+        if self.seconds_remaining <= 25 {
+            let mut grid = [[0u8; 5]; 5];
+            let mut rem = self.seconds_remaining as usize;
+            'grid: for row in 0..5 {
+                for col in 0..5 {
+                    if rem == 0 {
+                        break 'grid;
+                    }
+                    grid[row][col] = 1;
+                    rem -= 1;
+                }
+            }
+            return BitImage::new(&grid);
+        }
         let minutes = self.seconds_remaining / 60;
         if minutes > 99 {
             return BitImage::new(&symbols::CROSS);
@@ -191,12 +205,15 @@ impl AppState {
         match self.stage {
             Stage::Menu => self.render_countdown(),
             Stage::Countdown => self.render_countdown(),
-            Stage::Fin => BitImage::new(&symbols::ALARM),
+            Stage::Fin(ding) => BitImage::new(match ding {
+                true => &symbols::BELL_DING,
+                false => &symbols::BELL_DONG,
+            }),
         }
     }
 
     fn ring(&mut self) {
-        self.stage = Stage::Fin;
+        self.stage = Stage::Fin(true);
     }
 
     fn tick_second(&mut self) {
@@ -209,6 +226,7 @@ impl AppState {
                 };
                 rprintln!("tick: {}s remaining", self.seconds_remaining);
             }
+            Stage::Fin(ding) => self.stage = Stage::Fin(!ding),
             _ => {}
         }
     }
