@@ -24,6 +24,14 @@ pub const CORNERS: LedMatrix = [
     [1, 0, 0, 0, 1],
 ];
 
+pub const ALARM: LedMatrix = [
+    [0, 0, 1, 0, 0],
+    [0, 1, 1, 1, 0],
+    [0, 1, 1, 1, 0],
+    [1, 1, 1, 1, 1],
+    [0, 0, 1, 0, 0],
+];
+
 pub const CROSS: LedMatrix = [
     [1, 0, 0, 0, 1],
     [0, 1, 0, 1, 0],
