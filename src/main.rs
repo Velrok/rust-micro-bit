@@ -117,7 +117,7 @@ impl AppState {
             return BitImage::new(&grid);
         }
         let minutes = self.seconds_remaining / 60;
-        if minutes > 99 {
+        if minutes >= MAX_MINUTES {
             return BitImage::new(&symbols::CROSS);
         }
         let tens = (minutes / 10) as usize;
@@ -161,8 +161,7 @@ impl AppState {
 
     fn render(&self) -> BitImage {
         match self.stage {
-            Stage::Menu => self.render_countdown(),
-            Stage::Countdown => self.render_countdown(),
+            Stage::Menu | Stage::Countdown => self.render_countdown(),
             Stage::Fin(ding) => BitImage::new(match ding {
                 true => &symbols::BELL_DING,
                 false => &symbols::BELL_DONG,
